@@ -39,18 +39,8 @@ on:
         required: false
         default: false
         type: boolean
-      enable_kpm:
-        description: 'Enable KPM Support'
-        required: false
-        default: false
-        type: boolean
       enable_bbg:
         description: 'Enable Baseband Guard (BBG)'
-        required: false
-        default: true
-        type: boolean
-      enable_bbr:
-        description: 'Enable BBR TCP Congestion Control'
         required: false
         default: true
         type: boolean
@@ -197,22 +187,19 @@ jobs:
             BUILD_CMD="$BUILD_CMD --module-bypass"
           fi
           
-          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
-            BUILD_CMD="$BUILD_CMD --enable-kpm"
-          fi
-          
           BUILD_CMD="$BUILD_CMD --hook-method ${{ inputs.hook_method }}"
           BUILD_CMD="$BUILD_CMD --kernel-name \"${{ inputs.kernel_name }}\""
           BUILD_CMD="$BUILD_CMD --build-time \"${{ inputs.build_time }}\""
           
           # Export environment variables for optional features
           export ENABLE_BBG="${{ inputs.enable_bbg }}"
-          export ENABLE_BBR="${{ inputs.enable_bbr }}"
+          export ENABLE_BBR="false"
           export ENABLE_IPSET="${{ inputs.enable_ipset }}"
           export ENABLE_LTO="${{ inputs.enable_lto }}"
+          export ENABLE_KPM="false"
           
           echo "Executing: $BUILD_CMD"
-          echo "Additional options: BBG=$ENABLE_BBG, BBR=$ENABLE_BBR, IPSet=$ENABLE_IPSET, LTO=$ENABLE_LTO"
+          echo "Additional options: BBG=$ENABLE_BBG, BBR=$ENABLE_BBR, IPSet=$ENABLE_IPSET, LTO=$ENABLE_LTO, KPM=$ENABLE_KPM"
           eval "$BUILD_CMD"
       
       - name: Prepare Release Assets
@@ -249,9 +236,9 @@ jobs:
           OS Patch Level: ${{ inputs.os_patch_level }}
           Hook Method: ${{ inputs.hook_method }}
           Module Bypass: ${{ inputs.module_bypass }}
-          KPM Support: ${{ inputs.enable_kpm }}
+          KPM Support: false (default)
           BBG (Baseband Guard): ${{ inputs.enable_bbg }}
-          BBR TCP Optimization: ${{ inputs.enable_bbr }}
+          BBR TCP Optimization: false (default)
           IPSet Support: ${{ inputs.enable_ipset }}
           LTO Optimization: ${{ inputs.enable_lto }}
           Kernel Name: ${{ inputs.kernel_name }}
