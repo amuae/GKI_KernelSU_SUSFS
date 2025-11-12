@@ -176,9 +176,12 @@ jobs:
         working-directory: GKI_KernelSU_SUSFS/build
         env:
           CI: true
-          WORK_DIR: ${{ env.SOURCE_DIR }}
         run: |
           echo "=== Building Kernel ==="
+          
+          # Set WORK_DIR to SOURCE_DIR for CI environment
+          export WORK_DIR="${{ env.SOURCE_DIR }}"
+          echo "WORK_DIR is set to: $WORK_DIR"
           
           # Update build_kernel.sh to support BBG, BBR, IPSet, LTO options
           # These are enabled by default in the script, so we need to disable them if requested
