@@ -166,14 +166,17 @@ jobs:
           
           cd ..
           
-          # Create working copy
-          echo "Creating working copy..."
-          cp -r "${SOURCE_DIR}" "${WORK_DIR}"
-          echo "WORK_DIR=${WORK_DIR}" >> $GITHUB_ENV
+          # Use source directory directly (no work copy needed)
+          # Set WORK_DIR to SOURCE_DIR so the build script can use it directly
+          echo "SOURCE_DIR=${SOURCE_DIR}" >> $GITHUB_ENV
+          echo "WORK_DIR=${SOURCE_DIR}" >> $GITHUB_ENV
           echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
       
       - name: Build Kernel with KernelSU + SUSFS
         working-directory: GKI_KernelSU_SUSFS/build
+        env:
+          CI: true
+          WORK_DIR: ${{ env.SOURCE_DIR }}
         run: |
           echo "=== Building Kernel ==="
           

@@ -106,26 +106,38 @@ if [ ! -d "AnyKernel3" ]; then
 fi
 echo ""
 
-# Check if original source exists
-ORIGINAL_DIR="android14-6.1-118"
-if [ ! -d "$ORIGINAL_DIR" ]; then
-    echo "Error: Original source directory $ORIGINAL_DIR not found!"
-    echo "Please run download_kernel.sh first."
-    exit 1
-fi
+# Check if original source exists (skip in CI environment)
+if [ -z "$CI" ]; then
+    # Local build: copy from original source to work directory
+    ORIGINAL_DIR="android14-6.1-118"
+    if [ ! -d "$ORIGINAL_DIR" ]; then
+        echo "Error: Original source directory $ORIGINAL_DIR not found!"
+        echo "Please run download_kernel.sh first."
+        exit 1
+    fi
 
-# Clean and recreate working directory from original source
-echo "=== Preparing Working Directory ==="
-if [ -d "$WORK_DIR" ]; then
-    echo "Removing existing working directory..."
-    rm -rf "$WORK_DIR"
-fi
+    # Clean and recreate working directory from original source
+    echo "=== Preparing Working Directory ==="
+    if [ -d "$WORK_DIR" ]; then
+        echo "Removing existing working directory..."
+        rm -rf "$WORK_DIR"
+    fi
 
-echo "Copying fresh source from $ORIGINAL_DIR to $WORK_DIR..."
-echo "This may take a few minutes..."
-cp -r "$ORIGINAL_DIR" "$WORK_DIR"
-echo "Fresh copy created successfully!"
-echo ""
+    echo "Copying fresh source from $ORIGINAL_DIR to $WORK_DIR..."
+    echo "This may take a few minutes..."
+    cp -r "$ORIGINAL_DIR" "$WORK_DIR"
+    echo "Fresh copy created successfully!"
+    echo ""
+else
+    # CI environment: use source directory directly (no copy needed)
+    echo "=== CI Environment Detected ==="
+    echo "Using source directory directly: $WORK_DIR"
+    if [ ! -d "$WORK_DIR" ]; then
+        echo "Error: Source directory $WORK_DIR not found!"
+        exit 1
+    fi
+    echo ""
+fi
 
 # ============================================================================
 # 添加KernelSU (完全按照amuae工作流)
