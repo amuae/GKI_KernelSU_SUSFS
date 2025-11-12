@@ -1,4 +1,8 @@
-name: Build GKI Kernel with KernelSU + SUSFS
+name: Build GKI Kernel (Standalone)
+
+permissions:
+  contents: write
+  actions: write
 
 on:
   workflow_dispatch:
@@ -60,7 +64,7 @@ on:
         default: 'gca0ef6d17716-ab13624819'
         type: string
       build_time:
-        description: 'Build Time (auto or custom format)'
+        description: 'Build Time'
         required: false
         default: 'Tue Jun 10 18:59:08 UTC 2025'
         type: string
@@ -71,51 +75,29 @@ jobs:
     runs-on: ubuntu-22.04
     
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-        with:
-          path: GKI_KernelSU_SUSFS
-      
       - name: Setup Build Environment
         run: |
-          echo "Setting up build environment..."
-          sudo apt-get update
-          sudo apt-get install -y \
-            git \
-            curl \
-            wget \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            zip \
-            python3 \
-            python3-pip \
-            rsync
+          echo "=== Setting up build environment ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git curl wget build-essential bc bison flex libssl-dev libelf-dev zip python3 python3-pip rsync >/dev/null 2>&1
           
           # Install repo tool
           mkdir -p ~/bin
           curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
           chmod a+rx ~/bin/repo
           echo "$HOME/bin" >> $GITHUB_PATH
-      
-      - name: Download Kernel Source
-        working-directory: GKI_KernelSU_SUSFS/build
-        run: |
-          echo "=== Downloading Android ${{ inputs.android_version }} Kernel ${{ inputs.kernel_version }} (${{ inputs.os_patch_level }}) ==="
           
           # Force IPv4
-          export GIT_CONFIG_COUNT=2
-          export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
-          export GIT_CONFIG_VALUE_0="git://github.com/"
-          export GIT_CONFIG_KEY_1="http.version"
-          export GIT_CONFIG_VALUE_1="HTTP/1.1"
-          git config --global core.gitProxy ""
+          git config --global url."https://github.com/".insteadOf "git://github.com/"
           git config --global http.version HTTP/1.1
           
-          # Determine sublevel (default 118 for 6.1)
+          echo "Build environment ready"
+      
+      - name: Download Kernel Source
+        run: |
+          echo "=== Downloading Kernel Source ==="
+          
+          # Determine sublevel
           case "${{ inputs.kernel_version }}" in
             "5.15") SUBLEVEL="119" ;;
             "6.1")  SUBLEVEL="118" ;;
@@ -125,35 +107,28 @@ jobs:
           
           FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
           SOURCE_DIR="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${SUBLEVEL}"
-          WORK_DIR="${SOURCE_DIR}-work"
           
           echo "Branch: common-${FORMATTED_BRANCH}"
           echo "Source Dir: ${SOURCE_DIR}"
-          echo "Work Dir: ${WORK_DIR}"
           
-          # Create source directory
           mkdir -p "${SOURCE_DIR}"
           cd "${SOURCE_DIR}"
           
-          # Initialize repo
           ~/bin/repo init --depth=1 \
             --u https://android.googlesource.com/kernel/manifest \
             -b "common-${FORMATTED_BRANCH}" \
             --repo-rev=v2.16
           
-          # Check for deprecated branch
           REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common "${FORMATTED_BRANCH}" 2>/dev/null || true)
           if echo "$REMOTE_BRANCH" | grep -q deprecated; then
             echo "Branch is deprecated, updating manifest..."
             sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" .repo/manifests/default.xml
           fi
           
-          # Sync repositories
           CPU_COUNT=$(nproc)
           echo "Syncing with ${CPU_COUNT} parallel jobs..."
           ~/bin/repo sync -c -j"${CPU_COUNT}" --no-tags --fail-fast
           
-          # Extract actual sublevel
           if [ -f "common/Makefile" ]; then
             ACTUAL_SUBLEVEL=$(grep '^SUBLEVEL = ' common/Makefile | awk '{print $3}' || echo "${SUBLEVEL}")
             if [ -n "$ACTUAL_SUBLEVEL" ]; then
@@ -162,147 +137,336 @@ jobs:
           fi
           
           echo "Kernel version: ${{ inputs.kernel_version }}.${SUBLEVEL}"
-          echo "Download complete!"
+          cd ..
+          
+          echo "SOURCE_DIR=${SOURCE_DIR}" >> $GITHUB_ENV
+          echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
+      
+      - name: Setup KernelSU
+        run: |
+          echo "=== Adding KernelSU ==="
+          cd "${{ env.SOURCE_DIR }}"
+          
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s susfs-main
+          
+          cd ./KernelSU
+          
+          GIT_COMMIT_HASH=$(git rev-parse --short=8 HEAD)
+          echo "Current commit hash: $GIT_COMMIT_HASH"
+          
+          KSU_API_VERSION=""
+          for i in {1..3}; do
+            KSU_API_VERSION=$(curl -s "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/Makefile" | \
+              grep -m1 "KSU_VERSION_API :=" | \
+              awk -F'= ' '{print $2}' | \
+              tr -d '[:space:]' || echo "")
+            if [ -n "$KSU_API_VERSION" ]; then
+              break
+            fi
+            sleep 1
+          done
+          
+          if [ -z "$KSU_API_VERSION" ]; then
+            KSU_API_VERSION="3.1.7"
+            echo "[WARN] Cannot fetch remote API version, using default: $KSU_API_VERSION"
+          else
+            echo "[OK] KSU API version: $KSU_API_VERSION"
+          fi
+          
+          sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile || true
+          sed -i '/KSU_VERSION_API :=/d' kernel/Makefile || true
+          sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile || true
+          
+          echo "" >> kernel/Makefile
+          echo "define get_ksu_version_full" >> kernel/Makefile
+          echo "v\$1-${GIT_COMMIT_HASH}@main_test" >> kernel/Makefile
+          echo "endef" >> kernel/Makefile
+          echo "" >> kernel/Makefile
+          echo "KSU_VERSION_API := ${KSU_API_VERSION}" >> kernel/Makefile
+          echo "KSU_VERSION_FULL := v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@main_test" >> kernel/Makefile
+          
+          KSU_VERSION=$(git rev-list --count main 2>/dev/null || echo 0)
+          if [ "$KSU_VERSION" != "0" ]; then
+            KSU_VERSION=$((KSU_VERSION + 37185))
+          else
+            KSU_VERSION=114514
+          fi
+          echo "[OK] KSU version number: $KSU_VERSION"
+          echo "[OK] SukiSU version: v${KSU_API_VERSION}-${GIT_COMMIT_HASH}@main_test"
+          
+          cd ..
+      
+      - name: Apply SUSFS Patches
+        run: |
+          echo "=== Applying KernelSU & SUSFS Patches ==="
+          cd "${{ env.SOURCE_DIR }}"
+          
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch ./common/
+          cp -r ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp -r ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          
+          cd common
+          patch -p1 < 50_add_susfs_in_gki-${{ inputs.android_version }}-${{ inputs.kernel_version }}.patch || true
+          
+          if [ "${{ inputs.hook_method }}" == "manual" ]; then
+            echo "Applying manual hooks patch..."
+            cp ../SukiSU_patch/hooks/scope_min_manual_hooks_v1.6.patch ./
+            patch -p1 -F 3 < scope_min_manual_hooks_v1.6.patch || true
+          elif [ "${{ inputs.hook_method }}" == "syscall" ]; then
+            echo "Applying syscall hooks patch..."
+            cp ../SukiSU_patch/hooks/syscall_hooks.patch ./
+            patch -p1 -F 3 < syscall_hooks.patch || true
+          fi
+          
+          cp ../SukiSU_patch/69_hide_stuff.patch ./
+          patch -p1 -F 3 < 69_hide_stuff.patch || true
+          
+          cd ..
+      
+      - name: Apply Extra Patches
+        run: |
+          echo "=== Applying Extra Patches ==="
+          cd "${{ env.SOURCE_DIR }}/common"
+          
+          wget -q https://github.com/cctv18/oppo_oplus_realme_sm8650/raw/refs/heads/main/other_patch/config.patch || true
+          if [ -f "config.patch" ]; then
+            patch -p1 -F 3 < config.patch || true
+            echo "[OK] config.patch applied"
+          fi
           
           cd ..
           
-          # Use source directory directly (no work copy needed)
-          # Set WORK_DIR to SOURCE_DIR so the build script can use it directly
-          echo "SOURCE_DIR=${SOURCE_DIR}" >> $GITHUB_ENV
-          echo "WORK_DIR=${SOURCE_DIR}" >> $GITHUB_ENV
-          echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
+          if [ "${{ inputs.enable_bbg }}" = "true" ]; then
+            echo "=== Adding Baseband Guard (BBG) ==="
+            wget -q -O- https://github.com/vc-teahouse/Baseband-guard/raw/main/setup.sh | bash 2>&1 | grep -v "awk:" || true
+            echo "CONFIG_BBG=y" >> common/arch/arm64/configs/gki_defconfig
+            sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/lockdown/lockdown,baseband_guard/ } }' common/security/Kconfig
+            echo "BBG configured successfully"
+          fi
       
-      - name: Build Kernel with KernelSU + SUSFS
-        working-directory: GKI_KernelSU_SUSFS/build
-        env:
-          CI: true
+      - name: Configure Kernel
         run: |
-          echo "=== Building Kernel ==="
+          echo "=== Configuring Kernel ==="
+          cd "${{ env.SOURCE_DIR }}"
           
-          # Set WORK_DIR to SOURCE_DIR for CI environment
-          export WORK_DIR="${{ env.SOURCE_DIR }}"
-          echo "WORK_DIR is set to: $WORK_DIR"
+          DEFCONFIG="./common/arch/arm64/configs/gki_defconfig"
           
-          # Update build_kernel.sh to support BBG, BBR, IPSet, LTO options
-          # These are enabled by default in the script, so we need to disable them if requested
+          sed -i 's/check_defconfig//' ./common/build.config.gki
           
-          # Construct build command
-          BUILD_CMD="./build_kernel.sh"
+          echo "Adding kernel configurations..."
           
-          if [ "${{ inputs.module_bypass }}" = "true" ]; then
-            BUILD_CMD="$BUILD_CMD --module-bypass"
+          # KernelSU Configuration
+          echo "" >> "$DEFCONFIG"
+          echo "# KernelSU Configuration" >> "$DEFCONFIG"
+          echo "CONFIG_KSU=y" >> "$DEFCONFIG"
+          if [ "${{ inputs.hook_method }}" == "kprobes" ]; then
+            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_MANUAL_HOOK=n" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_KPROBES_HOOK=y" >> "$DEFCONFIG"
+          else
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> "$DEFCONFIG"
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> "$DEFCONFIG"
           fi
           
-          BUILD_CMD="$BUILD_CMD --hook-method ${{ inputs.hook_method }}"
-          BUILD_CMD="$BUILD_CMD --kernel-name \"${{ inputs.kernel_name }}\""
-          BUILD_CMD="$BUILD_CMD --build-time \"${{ inputs.build_time }}\""
+          # Mountify Support
+          echo "" >> "$DEFCONFIG"
+          echo "# Mountify Support" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_XATTR=y" >> "$DEFCONFIG"
+          echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$DEFCONFIG"
           
-          # Export environment variables for optional features
-          export ENABLE_BBG="${{ inputs.enable_bbg }}"
-          export ENABLE_BBR="false"
-          export ENABLE_IPSET="${{ inputs.enable_ipset }}"
-          export ENABLE_LTO="${{ inputs.enable_lto }}"
-          export ENABLE_KPM="false"
+          # Networking Configuration
+          echo "" >> "$DEFCONFIG"
+          echo "# Networking Configuration" >> "$DEFCONFIG"
+          echo "CONFIG_IP_NF_TARGET_TTL=y" >> "$DEFCONFIG"
+          echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$DEFCONFIG"
+          echo "CONFIG_IP6_NF_MATCH_HL=y" >> "$DEFCONFIG"
           
-          echo "Executing: $BUILD_CMD"
-          echo "Additional options: BBG=$ENABLE_BBG, BBR=$ENABLE_BBR, IPSet=$ENABLE_IPSET, LTO=$ENABLE_LTO, KPM=$ENABLE_KPM"
-          eval "$BUILD_CMD"
+          # IPSet Support (optional)
+          if [ "${{ inputs.enable_ipset }}" = "true" ]; then
+            echo "" >> "$DEFCONFIG"
+            echo "# IPSet Support" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_MAX=65534" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_BITMAP_IP=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_BITMAP_IPMAC=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_BITMAP_PORT=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IP=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IPMARK=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IPPORT=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IPPORTIP=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IPPORTNET=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_IPMAC=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_MAC=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_NETPORTNET=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_NET=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_NETNET=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_NETPORT=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_HASH_NETIFACE=y" >> "$DEFCONFIG"
+            echo "CONFIG_IP_SET_LIST_SET=y" >> "$DEFCONFIG"
+          fi
+          
+          # SUSFS Configuration
+          echo "" >> "$DEFCONFIG"
+          echo "# SUSFS Configuration" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$DEFCONFIG"
+          echo "CONFIG_KSU_SUSFS_SUS_MAP=y" >> "$DEFCONFIG"
+          
+          # Sound Configuration
+          echo "" >> "$DEFCONFIG"
+          echo "# Sound Configuration" >> "$DEFCONFIG"
+          echo "CONFIG_SND=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_DRIVERS=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_PCM=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_TIMER=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_DYNAMIC_MINORS=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_PROC_FS=y" >> "$DEFCONFIG"
+          echo "CONFIG_SND_ALOOP=m" >> "$DEFCONFIG"
+          
+          # LTO Optimization (optional)
+          if [ "${{ inputs.enable_lto }}" = "true" ]; then
+            echo "" >> "$DEFCONFIG"
+            echo "# Build Optimization" >> "$DEFCONFIG"
+            echo "CONFIG_LTO_CLANG_THIN=y" >> "$DEFCONFIG"
+            echo "CONFIG_LTO_CLANG=y" >> "$DEFCONFIG"
+            echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE=y" >> "$DEFCONFIG"
+            echo "CONFIG_CC_OPTIMIZE_FOR_PERFORMANCE_O3=n" >> "$DEFCONFIG"
+            echo "CONFIG_OPTIMIZE_INLINING=y" >> "$DEFCONFIG"
+          fi
+          
+          echo "Configuration complete!"
+          
+          # Add snd-aloop to modules list
+          echo "sound/drivers/snd-aloop.ko" >> common/android/gki_aarch64_modules
+          
+          if [[ -f common/modules.bzl ]]; then
+            if [[ "${{ inputs.android_version }}" == "android14" ]] && [[ "${{ inputs.kernel_version }}" == "6.1" ]] && (( ${{ env.SUBLEVEL }} <= 25 )) && [[ "${{ inputs.os_patch_level }}" != "2023-09" ]]; then
+              sed -i '/COMMON_GKI_MODULES_LIST = \[/,/^[[:space:]]*\]/{/^[[:space:]]*\]$/i\    "sound/drivers/snd-aloop.ko",
+              }' common/modules.bzl
+            else
+              sed -i '/_COMMON_GKI_MODULES_LIST = \[/,/^[[:space:]]*\]/{/^[[:space:]]*\]$/i\    "sound/drivers/snd-aloop.ko",
+              }' common/modules.bzl
+            fi
+          fi
+          
+          # ABI bypass
+          perl -i -pe 's/^(\s*)return 1$/$1print("Who Cares? Bypassing Now!")\n$1return 0/g if /if missing_symbols:/../return 1/' build/kernel/abi/check_buildtime_symbol_protection.py
+          
+          # Module check bypass
+          if [ "${{ inputs.module_bypass }}" = "true" ]; then
+            if [[ "${{ inputs.kernel_version }}" == "6.1" ]] || [[ "${{ inputs.kernel_version }}" == "6.6" ]]; then
+              TARGET_FILE="common/kernel/module/version.c"
+            else
+              TARGET_FILE="common/kernel/module.c"
+            fi
+            
+            if [ -f "$TARGET_FILE" ]; then
+              sed -i '/bad_version:/{:a;n;/return 0;/{s/return 0;/return 1;/;b};ba}' "$TARGET_FILE"
+              echo "[OK] Module check bypass applied"
+            fi
+          fi
       
-      - name: Prepare Release Assets
-        working-directory: GKI_KernelSU_SUSFS/build
+      - name: Modify Kernel Version
         run: |
-          echo "=== Preparing Release Assets ==="
+          echo "=== Modifying Kernel Version ==="
+          cd "${{ env.SOURCE_DIR }}"
           
-          # Find generated files
-          IMAGE_FILE=$(ls -1 Image-*.* 2>/dev/null | head -1 || echo "")
-          ZIP_FILE=$(ls -1 *.zip 2>/dev/null | head -1 || echo "")
+          sed -i "\$s|echo \"\\\$res\"|echo \"\\\$res-${{ inputs.kernel_name }}\"|" ./common/scripts/setlocalversion
           
-          if [ -z "$IMAGE_FILE" ] || [ -z "$ZIP_FILE" ]; then
-            echo "Error: Build artifacts not found!"
+          BUILD_TIMESTAMP=$(date -u -d "${{ inputs.build_time }}" +%s 2>/dev/null || echo "1749492000")
+          echo "Build timestamp (epoch): $BUILD_TIMESTAMP"
+          
+          sed -i "s/export SOURCE_DATE_EPOCH=0/export SOURCE_DATE_EPOCH=$BUILD_TIMESTAMP/" ./build/kernel/kleaf/impl/stamp.bzl
+          sed -i "/stable_scmversion_cmd/s/-maybe-dirty//g" ./build/kernel/kleaf/impl/stamp.bzl
+          
+          rm -rf ./common/android/abi_gki_protected_exports_*
+          perl -pi -e 's/^\s*"protected_exports_list"\s*:\s*"android\/abi_gki_protected_exports_aarch64",\s*$//;' ./common/BUILD.bazel
+      
+      - name: Build Kernel
+        run: |
+          echo "=== Building Kernel ==="
+          cd "${{ env.SOURCE_DIR }}"
+          
+          echo "This may take 30-60 minutes..."
+          echo "Build started at: $(date)"
+          
+          tools/bazel build --config=fast --lto=thin //common:kernel_aarch64_dist
+          
+          echo "Build completed at: $(date)"
+      
+      - name: Package Kernel
+        run: |
+          echo "=== Packaging Kernel ==="
+          cd "${{ env.SOURCE_DIR }}"
+          
+          BAZEL_BIN="bazel-bin/common/kernel_aarch64"
+          IMAGE_FILE="${BAZEL_BIN}/Image"
+          
+          if [ ! -f "$IMAGE_FILE" ]; then
+            echo "Error: Kernel Image not found!"
             exit 1
           fi
           
-          echo "Found Image: $IMAGE_FILE"
-          echo "Found AnyKernel3 ZIP: $ZIP_FILE"
+          KERNEL_RELEASE=$(cat ${BAZEL_BIN}/include/config/kernel.release | tr '+' '_')
+          OUTPUT_IMAGE="Image-${KERNEL_RELEASE}"
+          cp "$IMAGE_FILE" "../${OUTPUT_IMAGE}"
           
-          # Store for upload
-          echo "IMAGE_FILE=${IMAGE_FILE}" >> $GITHUB_ENV
-          echo "ZIP_FILE=${ZIP_FILE}" >> $GITHUB_ENV
+          cd ..
+          if [ ! -d "AnyKernel3" ]; then
+            git clone https://github.com/WildKernels/AnyKernel3.git -b gki-2.0
+          fi
           
-          # Calculate SHA256
-          sha256sum "$IMAGE_FILE" > "${IMAGE_FILE}.sha256"
-          sha256sum "$ZIP_FILE" > "${ZIP_FILE}.sha256"
+          cp "${OUTPUT_IMAGE}" AnyKernel3/
+          cd AnyKernel3
           
-          # Create build info
-          cat > build-info.txt << EOF
-          Build Information
-          =================
-          Android Version: ${{ inputs.android_version }}
-          Kernel Version: ${{ inputs.kernel_version }}.${SUBLEVEL}
-          OS Patch Level: ${{ inputs.os_patch_level }}
-          Hook Method: ${{ inputs.hook_method }}
-          Module Bypass: ${{ inputs.module_bypass }}
-          KPM Support: false (default)
-          BBG (Baseband Guard): ${{ inputs.enable_bbg }}
-          BBR TCP Optimization: false (default)
-          IPSet Support: ${{ inputs.enable_ipset }}
-          LTO Optimization: ${{ inputs.enable_lto }}
-          Kernel Name: ${{ inputs.kernel_name }}
-          Build Time: ${{ inputs.build_time }}
+          ZIP_NAME="AnyKernel3-${KERNEL_RELEASE}.zip"
+          zip -r9 "../${ZIP_NAME}" * -x .git README.md placeholder
+          cd ..
           
-          Built on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
-          Builder: GitHub Actions
-          Workflow: ${{ github.workflow }}
-          Run ID: ${{ github.run_id }}
-          
-          Files
-          =====
-          - ${IMAGE_FILE}
-          - ${ZIP_FILE}
-          
-          SHA256 Checksums
-          ================
-          $(cat "${IMAGE_FILE}.sha256")
-          $(cat "${ZIP_FILE}.sha256")
-          
-          Installation
-          ============
-          1. Flash ${ZIP_FILE} in recovery (TWRP/OrangeFox)
-          2. Install KernelSU Manager app from https://github.com/tiann/KernelSU
-          3. Reboot and verify KSU is working
-          
-          KernelSU + SUSFS Features
-          =========================
-          - KernelSU: Root solution with module support
-          - SUSFS: Superuser File System hiding
-          - Version: Check with KernelSU Manager
-          EOF
+          echo "IMAGE_FILE=${OUTPUT_IMAGE}" >> $GITHUB_ENV
+          echo "ZIP_FILE=${ZIP_NAME}" >> $GITHUB_ENV
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}-${{ github.run_number }}
-          name: "GKI ${{ inputs.android_version }} Kernel ${{ inputs.kernel_version }}.${SUBLEVEL} with KernelSU+SUSFS"
-          body_path: GKI_KernelSU_SUSFS/build/build-info.txt
+          name: "GKI ${{ inputs.android_version }} Kernel ${{ inputs.kernel_version }}.${{ env.SUBLEVEL }}"
+          body: |
+            ## GKI Kernel with KernelSU + SUSFS
+            
+            **Build Information:**
+            - Android Version: ${{ inputs.android_version }}
+            - Kernel Version: ${{ inputs.kernel_version }}.${{ env.SUBLEVEL }}
+            - OS Patch Level: ${{ inputs.os_patch_level }}
+            - Hook Method: ${{ inputs.hook_method }}
+            - Module Bypass: ${{ inputs.module_bypass }}
+            - BBG Protection: ${{ inputs.enable_bbg }}
+            - IPSet Support: ${{ inputs.enable_ipset }}
+            - LTO Optimization: ${{ inputs.enable_lto }}
+            
+            **Installation:**
+            1. Flash the AnyKernel3 ZIP in recovery (TWRP/OrangeFox)
+            2. Install KernelSU Manager from https://github.com/tiann/KernelSU
+            3. Reboot and verify
           draft: false
           prerelease: false
           files: |
-            GKI_KernelSU_SUSFS/build/${{ env.IMAGE_FILE }}
-            GKI_KernelSU_SUSFS/build/${{ env.IMAGE_FILE }}.sha256
-            GKI_KernelSU_SUSFS/build/${{ env.ZIP_FILE }}
-            GKI_KernelSU_SUSFS/build/${{ env.ZIP_FILE }}.sha256
-            GKI_KernelSU_SUSFS/build/build-info.txt
+            ${{ env.IMAGE_FILE }}
+            ${{ env.ZIP_FILE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      
-      - name: Upload Build Artifacts
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: kernel-build-${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ github.run_number }}
-          path: |
-            GKI_KernelSU_SUSFS/build/Image-*
-            GKI_KernelSU_SUSFS/build/*.zip
-            GKI_KernelSU_SUSFS/build/*.sha256
-            GKI_KernelSU_SUSFS/build/build-info.txt
-          retention-days: 30
