@@ -1,1 +1,14 @@
 download.sh
+
+# Build directories
+build/android14-*/
+build/git-repo/
+build/*.zip
+build/Image-*
+build/*.img
+build/*.sha256
+build/build-info.txt
+build/AnyKernel3/
+build/susfs4ksu/
+build/SukiSU_patch/
+build/*.so

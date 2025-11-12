@@ -1,0 +1,315 @@
+name: Build GKI Kernel with KernelSU + SUSFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_version:
+        description: 'Android Version'
+        required: true
+        default: 'android14'
+        type: choice
+        options:
+          - android14
+          - android15
+      kernel_version:
+        description: 'Kernel Version'
+        required: true
+        default: '6.1'
+        type: choice
+        options:
+          - '5.15'
+          - '6.1'
+          - '6.6'
+      os_patch_level:
+        description: 'OS Patch Level (YYYY-MM)'
+        required: true
+        default: '2025-01'
+        type: string
+      hook_method:
+        description: 'Hook Method'
+        required: true
+        default: 'manual'
+        type: choice
+        options:
+          - manual
+          - syscall
+          - kprobes
+      module_bypass:
+        description: 'Enable Module Bypass'
+        required: false
+        default: false
+        type: boolean
+      enable_kpm:
+        description: 'Enable KPM Support'
+        required: false
+        default: false
+        type: boolean
+      enable_bbg:
+        description: 'Enable Baseband Guard (BBG)'
+        required: false
+        default: true
+        type: boolean
+      enable_bbr:
+        description: 'Enable BBR TCP Congestion Control'
+        required: false
+        default: true
+        type: boolean
+      enable_ipset:
+        description: 'Enable IPSet Support'
+        required: false
+        default: true
+        type: boolean
+      enable_lto:
+        description: 'Enable LTO (Link Time Optimization)'
+        required: false
+        default: true
+        type: boolean
+      kernel_name:
+        description: 'Custom Kernel Name Suffix'
+        required: false
+        default: 'gca0ef6d17716-ab13624819'
+        type: string
+      build_time:
+        description: 'Build Time (auto or custom format)'
+        required: false
+        default: 'Tue Jun 10 18:59:08 UTC 2025'
+        type: string
+
+jobs:
+  build:
+    name: Build Kernel
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          path: GKI_KernelSU_SUSFS
+      
+      - name: Setup Build Environment
+        run: |
+          echo "Setting up build environment..."
+          sudo apt-get update
+          sudo apt-get install -y \
+            git \
+            curl \
+            wget \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            zip \
+            python3 \
+            python3-pip \
+            rsync
+          
+          # Install repo tool
+          mkdir -p ~/bin
+          curl -s https://storage.googleapis.com/git-repo-downloads/repo > ~/bin/repo
+          chmod a+rx ~/bin/repo
+          echo "$HOME/bin" >> $GITHUB_PATH
+      
+      - name: Download Kernel Source
+        working-directory: GKI_KernelSU_SUSFS/build
+        run: |
+          echo "=== Downloading Android ${{ inputs.android_version }} Kernel ${{ inputs.kernel_version }} (${{ inputs.os_patch_level }}) ==="
+          
+          # Force IPv4
+          export GIT_CONFIG_COUNT=2
+          export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_0="git://github.com/"
+          export GIT_CONFIG_KEY_1="http.version"
+          export GIT_CONFIG_VALUE_1="HTTP/1.1"
+          git config --global core.gitProxy ""
+          git config --global http.version HTTP/1.1
+          
+          # Determine sublevel (default 118 for 6.1)
+          case "${{ inputs.kernel_version }}" in
+            "5.15") SUBLEVEL="119" ;;
+            "6.1")  SUBLEVEL="118" ;;
+            "6.6")  SUBLEVEL="65" ;;
+            *)      SUBLEVEL="118" ;;
+          esac
+          
+          FORMATTED_BRANCH="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}"
+          SOURCE_DIR="${{ inputs.android_version }}-${{ inputs.kernel_version }}-${SUBLEVEL}"
+          WORK_DIR="${SOURCE_DIR}-work"
+          
+          echo "Branch: common-${FORMATTED_BRANCH}"
+          echo "Source Dir: ${SOURCE_DIR}"
+          echo "Work Dir: ${WORK_DIR}"
+          
+          # Create source directory
+          mkdir -p "${SOURCE_DIR}"
+          cd "${SOURCE_DIR}"
+          
+          # Initialize repo
+          ~/bin/repo init --depth=1 \
+            --u https://android.googlesource.com/kernel/manifest \
+            -b "common-${FORMATTED_BRANCH}" \
+            --repo-rev=v2.16
+          
+          # Check for deprecated branch
+          REMOTE_BRANCH=$(git ls-remote https://android.googlesource.com/kernel/common "${FORMATTED_BRANCH}" 2>/dev/null || true)
+          if echo "$REMOTE_BRANCH" | grep -q deprecated; then
+            echo "Branch is deprecated, updating manifest..."
+            sed -i "s/\"${FORMATTED_BRANCH}\"/\"deprecated\/${FORMATTED_BRANCH}\"/g" .repo/manifests/default.xml
+          fi
+          
+          # Sync repositories
+          CPU_COUNT=$(nproc)
+          echo "Syncing with ${CPU_COUNT} parallel jobs..."
+          ~/bin/repo sync -c -j"${CPU_COUNT}" --no-tags --fail-fast
+          
+          # Extract actual sublevel
+          if [ -f "common/Makefile" ]; then
+            ACTUAL_SUBLEVEL=$(grep '^SUBLEVEL = ' common/Makefile | awk '{print $3}' || echo "${SUBLEVEL}")
+            if [ -n "$ACTUAL_SUBLEVEL" ]; then
+              SUBLEVEL="$ACTUAL_SUBLEVEL"
+            fi
+          fi
+          
+          echo "Kernel version: ${{ inputs.kernel_version }}.${SUBLEVEL}"
+          echo "Download complete!"
+          
+          cd ..
+          
+          # Create working copy
+          echo "Creating working copy..."
+          cp -r "${SOURCE_DIR}" "${WORK_DIR}"
+          echo "WORK_DIR=${WORK_DIR}" >> $GITHUB_ENV
+          echo "SUBLEVEL=${SUBLEVEL}" >> $GITHUB_ENV
+      
+      - name: Build Kernel with KernelSU + SUSFS
+        working-directory: GKI_KernelSU_SUSFS/build
+        run: |
+          echo "=== Building Kernel ==="
+          
+          # Update build_kernel.sh to support BBG, BBR, IPSet, LTO options
+          # These are enabled by default in the script, so we need to disable them if requested
+          
+          # Construct build command
+          BUILD_CMD="./build_kernel.sh"
+          
+          if [ "${{ inputs.module_bypass }}" = "true" ]; then
+            BUILD_CMD="$BUILD_CMD --module-bypass"
+          fi
+          
+          if [ "${{ inputs.enable_kpm }}" = "true" ]; then
+            BUILD_CMD="$BUILD_CMD --enable-kpm"
+          fi
+          
+          BUILD_CMD="$BUILD_CMD --hook-method ${{ inputs.hook_method }}"
+          BUILD_CMD="$BUILD_CMD --kernel-name \"${{ inputs.kernel_name }}\""
+          BUILD_CMD="$BUILD_CMD --build-time \"${{ inputs.build_time }}\""
+          
+          # Export environment variables for optional features
+          export ENABLE_BBG="${{ inputs.enable_bbg }}"
+          export ENABLE_BBR="${{ inputs.enable_bbr }}"
+          export ENABLE_IPSET="${{ inputs.enable_ipset }}"
+          export ENABLE_LTO="${{ inputs.enable_lto }}"
+          
+          echo "Executing: $BUILD_CMD"
+          echo "Additional options: BBG=$ENABLE_BBG, BBR=$ENABLE_BBR, IPSet=$ENABLE_IPSET, LTO=$ENABLE_LTO"
+          eval "$BUILD_CMD"
+      
+      - name: Prepare Release Assets
+        working-directory: GKI_KernelSU_SUSFS/build
+        run: |
+          echo "=== Preparing Release Assets ==="
+          
+          # Find generated files
+          IMAGE_FILE=$(ls -1 Image-*.* 2>/dev/null | head -1 || echo "")
+          ZIP_FILE=$(ls -1 *.zip 2>/dev/null | head -1 || echo "")
+          
+          if [ -z "$IMAGE_FILE" ] || [ -z "$ZIP_FILE" ]; then
+            echo "Error: Build artifacts not found!"
+            exit 1
+          fi
+          
+          echo "Found Image: $IMAGE_FILE"
+          echo "Found AnyKernel3 ZIP: $ZIP_FILE"
+          
+          # Store for upload
+          echo "IMAGE_FILE=${IMAGE_FILE}" >> $GITHUB_ENV
+          echo "ZIP_FILE=${ZIP_FILE}" >> $GITHUB_ENV
+          
+          # Calculate SHA256
+          sha256sum "$IMAGE_FILE" > "${IMAGE_FILE}.sha256"
+          sha256sum "$ZIP_FILE" > "${ZIP_FILE}.sha256"
+          
+          # Create build info
+          cat > build-info.txt << EOF
+          Build Information
+          =================
+          Android Version: ${{ inputs.android_version }}
+          Kernel Version: ${{ inputs.kernel_version }}.${SUBLEVEL}
+          OS Patch Level: ${{ inputs.os_patch_level }}
+          Hook Method: ${{ inputs.hook_method }}
+          Module Bypass: ${{ inputs.module_bypass }}
+          KPM Support: ${{ inputs.enable_kpm }}
+          BBG (Baseband Guard): ${{ inputs.enable_bbg }}
+          BBR TCP Optimization: ${{ inputs.enable_bbr }}
+          IPSet Support: ${{ inputs.enable_ipset }}
+          LTO Optimization: ${{ inputs.enable_lto }}
+          Kernel Name: ${{ inputs.kernel_name }}
+          Build Time: ${{ inputs.build_time }}
+          
+          Built on: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
+          Builder: GitHub Actions
+          Workflow: ${{ github.workflow }}
+          Run ID: ${{ github.run_id }}
+          
+          Files
+          =====
+          - ${IMAGE_FILE}
+          - ${ZIP_FILE}
+          
+          SHA256 Checksums
+          ================
+          $(cat "${IMAGE_FILE}.sha256")
+          $(cat "${ZIP_FILE}.sha256")
+          
+          Installation
+          ============
+          1. Flash ${ZIP_FILE} in recovery (TWRP/OrangeFox)
+          2. Install KernelSU Manager app from https://github.com/tiann/KernelSU
+          3. Reboot and verify KSU is working
+          
+          KernelSU + SUSFS Features
+          =========================
+          - KernelSU: Root solution with module support
+          - SUSFS: Superuser File System hiding
+          - Version: Check with KernelSU Manager
+          EOF
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ inputs.os_patch_level }}-${{ github.run_number }}
+          name: "GKI ${{ inputs.android_version }} Kernel ${{ inputs.kernel_version }}.${SUBLEVEL} with KernelSU+SUSFS"
+          body_path: GKI_KernelSU_SUSFS/build/build-info.txt
+          draft: false
+          prerelease: false
+          files: |
+            GKI_KernelSU_SUSFS/build/${{ env.IMAGE_FILE }}
+            GKI_KernelSU_SUSFS/build/${{ env.IMAGE_FILE }}.sha256
+            GKI_KernelSU_SUSFS/build/${{ env.ZIP_FILE }}
+            GKI_KernelSU_SUSFS/build/${{ env.ZIP_FILE }}.sha256
+            GKI_KernelSU_SUSFS/build/build-info.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-build-${{ inputs.android_version }}-${{ inputs.kernel_version }}-${{ github.run_number }}
+          path: |
+            GKI_KernelSU_SUSFS/build/Image-*
+            GKI_KernelSU_SUSFS/build/*.zip
+            GKI_KernelSU_SUSFS/build/*.sha256
+            GKI_KernelSU_SUSFS/build/build-info.txt
+          retention-days: 30
