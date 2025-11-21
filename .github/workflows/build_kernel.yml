@@ -397,10 +397,11 @@ jobs:
           echo "CONFIG_IP6_NF_TARGET_HL=y" >> "$DEFCONFIG"
           echo "CONFIG_IP6_NF_MATCH_HL=y" >> "$DEFCONFIG"
           
-          # Wireguard Support
+          # Wireguard Support (built-in to avoid module_outs complexity)
           echo "" >> "$DEFCONFIG"
           echo "# Wireguard VPN Support" >> "$DEFCONFIG"
-          echo "CONFIG_WIREGUARD=m" >> "$DEFCONFIG"
+          echo "CONFIG_WIREGUARD=y" >> "$DEFCONFIG"
+          echo "CONFIG_WIREGUARD_DEBUG=n" >> "$DEFCONFIG"
           
           # IPSet Support (optional)
           if [ "${{ inputs.enable_ipset }}" = "true" ]; then
