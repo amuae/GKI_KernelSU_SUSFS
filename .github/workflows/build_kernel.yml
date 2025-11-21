@@ -5,6 +5,11 @@ permissions:
   actions: write
 
 on:
+  push:
+    branches:
+      - sukisu
+    paths:
+      - '.github/workflows/build_kernel.yml'
   workflow_dispatch:
     inputs:
       android_version:
