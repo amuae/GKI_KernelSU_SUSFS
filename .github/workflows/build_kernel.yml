@@ -5,17 +5,12 @@ permissions:
   actions: write
 
 on:
-  push:
-    branches:
-      - sukisu
-    paths:
-      - '.github/workflows/build_kernel.yml'
   workflow_dispatch:
     inputs:
       android_version:
         description: 'Android版本'
         required: true
-        default: 'android14'
+        default: 'android15'
         type: choice
         options:
           - android14
@@ -23,7 +18,7 @@ on:
       kernel_version:
         description: '内核版本'
         required: true
-        default: '6.1'
+        default: '6.6'
         type: choice
         options:
           - '5.15'
