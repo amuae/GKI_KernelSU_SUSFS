@@ -247,8 +247,8 @@ jobs:
       - name: 克隆性能补丁仓库
         run: |
           echo "=== 克隆性能补丁仓库 ==="
-          cd "${{ env.SOURCE_DIR }}"
           git clone https://github.com/WildKernels/kernel_patches.git --depth=1
+          ls -la kernel_patches/common/ || echo "Failed to clone kernel_patches"
       
       - name: 应用性能优化补丁
         run: |
@@ -271,12 +271,15 @@ jobs:
           patch -p1 --forward < reduce_cache_pressure.patch || true
           echo "[OK] Applied reduce_cache_pressure.patch"
           
-          # 4. 清除页面 16 字节对齐（内核版本 < 5.16）
-          if [ "$(printf '%s\n' "${{ inputs.kernel_version }}" "$MIN_VERSION" | sort -V | head -n1)" = "${{ inputs.kernel_version }}" ]; then
+          # 4. 清除页面 16 字节对齐（内核版本检测）
+          CURRENT_VERSION="${{ inputs.kernel_version }}"
+          if [ "$(printf '%s\n' "$CURRENT_VERSION" "$MIN_VERSION" | sort -V | head -n1)" = "$CURRENT_VERSION" ]; then
+            echo "Kernel $CURRENT_VERSION < $MIN_VERSION, using original patch"
             cp ../../kernel_patches/common/clear_page_16bytes_align.patch ./
             patch -p1 --forward < clear_page_16bytes_align.patch || true
             echo "[OK] Applied clear_page_16bytes_align.patch"
           else
+            echo "Kernel $CURRENT_VERSION >= $MIN_VERSION, using __pi variant"
             cp ../../kernel_patches/common/clear_page_16bytes_align.patch ./
             sed -e 's/SYM_FUNC_START_PI(clear_page)/SYM_FUNC_START_PI(__pi_clear_page)/' clear_page_16bytes_align.patch > clear_page_16bytes_align__pi.patch
             patch -p1 -F3 --forward < clear_page_16bytes_align__pi.patch || true
