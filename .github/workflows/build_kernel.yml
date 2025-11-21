@@ -10,7 +10,7 @@ on:
       android_version:
         description: 'Android版本'
         required: true
-        default: 'android15'
+        default: 'android14'
         type: choice
         options:
           - android14
@@ -18,7 +18,7 @@ on:
       kernel_version:
         description: '内核版本'
         required: true
-        default: '6.6'
+        default: '6.1'
         type: choice
         options:
           - '5.15'
